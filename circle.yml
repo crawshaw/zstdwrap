@@ -1,0 +1,18 @@
+version: 2
+jobs:
+        build:
+                working_directory: /go/src/github.com/crawshaw/zstdwrap
+                docker:
+                        - image: golang:1.12
+
+                steps:
+                        - checkout
+                        - restore_cache:
+                                keys:
+                                        - v1-pkg-cache
+                        - run: go test
+                        - save_cache:
+                                key: v1-pkg-cache
+                                paths:
+                                        - "/go/pkg"
+
