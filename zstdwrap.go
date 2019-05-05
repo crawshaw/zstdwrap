@@ -27,11 +27,14 @@ package zstdwrap
 //
 // #define ZSTD_STATIC_LINKING_ONLY
 // #include "zstd.h"
+// #include "zstd_errors.h"
 import "C"
 import (
 	"errors"
 	"fmt"
 	"unsafe"
+
+	"golang.org/x/xerrors"
 )
 
 type COptions struct {
@@ -137,42 +140,31 @@ func NewDecompressor(windowLogMax int) (*Decompressor, error) {
 	return d, nil
 }
 
-var ErrContentSizeUnknown = errors.New("zstdwrap: unknown frame content size")
-
 // Decompress decompresse the contents of src into dst, and returns the new dst.
 //
 // Decompress requires the frame being decompressed be smaller
-// than cap(dst) and smaller than the Decompressor's maximum window log.
-// (Frames encoded in a single-pass, such as using this package's
-// Compress method, contain a size. Frames that were stream encoded may
-// not contain a size.)
+// than cap(dst) or be smaller than the Decompressor's maximum
+// window log.
 //
-// Always decompresses a complete frame or reports an error.
+// The len(src) must be exactly equal to the byte length of one
+// or more frames.
 func (d *Decompressor) Decompress(dst, src []byte) ([]byte, error) {
+	if src == nil {
+		return nil, errors.New("zstdwrap.Decompress: nil src")
+	}
 	if dst != nil {
 		dst = dst[:cap(dst)]
 	}
-	var srcv unsafe.Pointer
-	if src != nil {
-		srcv = unsafe.Pointer(&src[0])
+	if contentSize, err := FrameContentSize(src); err != nil {
+		return nil, xerrors.Errorf("zstdwrap.Decompress: %w", err)
+	} else if contentSize > int64(d.windowLogMax) {
+		return nil, xerrors.Errorf("zstdwrap.Decompress: frame too big: %d", contentSize)
+	} else if int(contentSize) > len(dst) {
+		dst = append(dst, make([]byte, int(contentSize)-len(dst))...)
 	}
-	frameSize := C.ZSTD_getFrameContentSize(srcv, C.size_t(len(src)))
-	if frameSize == C.ZSTD_CONTENTSIZE_UNKNOWN {
-		if dst == nil {
-			return nil, ErrContentSizeUnknown
-		}
-	} else if frameSize == C.ZSTD_CONTENTSIZE_ERROR {
-		if dst == nil {
-			return nil, errors.New("zstdwrap.Decompress.Size: failed")
-		}
-	} else if int64(frameSize) > int64(len(dst)) {
-		// A frame can be enormous (requiring a 64-bit representation).
-		if int64(frameSize) > int64(d.windowLogMax) {
-			return nil, fmt.Errorf("zstdwrap.Decompress: frame too big: %d (max: %d)", frameSize, d.windowLogMax)
-		}
-		dst = append(dst, make([]byte, int(frameSize)-len(dst))...)
-	}
+
 	dstv := unsafe.Pointer(&dst[0])
+	srcv := unsafe.Pointer(&src[0])
 	res := C.ZSTD_decompressDCtx(d.ctx, dstv, C.size_t(len(dst)), srcv, C.size_t(len(src)))
 	if err := isErr("Decompress", res); err != nil {
 		return nil, err
@@ -187,9 +179,93 @@ func (d *Decompressor) Delete() error {
 	return err
 }
 
-func isErr(loc string, res C.size_t) error {
-	if C.ZSTD_isError(res) != 0 {
-		return fmt.Errorf("zstdwrap.%s: %s", loc, C.GoString(C.ZSTD_getErrorName(res)))
+var ErrContentSizeUnknown = errors.New("zstdwrap: unknown frame content size")
+var ErrBadFrame = errors.New("zstdwrap: bad frame")
+
+// FrameContentSize reports the decompressed size of a frame's content.
+func FrameContentSize(src []byte) (int64, error) {
+	var srcv unsafe.Pointer
+	if src != nil {
+		srcv = unsafe.Pointer(&src[0])
 	}
-	return nil
+	sz := C.ZSTD_getFrameContentSize(srcv, C.size_t(len(src)))
+	if sz == C.ZSTD_CONTENTSIZE_UNKNOWN {
+		return 0, ErrContentSizeUnknown
+	} else if sz == C.ZSTD_CONTENTSIZE_ERROR {
+		return 0, ErrBadFrame
+	}
+	return int64(sz), nil
 }
+
+// FrameCompressedSize reports the size of a frame.
+// For the reported value n, buf[:n] is a valid src for Decompress.
+func FrameCompressedSize(buf []byte) (n int, err error) {
+	var bufv unsafe.Pointer
+	if buf != nil {
+		bufv = unsafe.Pointer(&buf[0])
+	}
+	res := C.ZSTD_findFrameCompressedSize(bufv, C.size_t(len(buf)))
+	if err := isErr("", res); err != nil {
+		// no location so ErrCodeSrcSizeWrong is zero-alloc
+		return 0, err
+	}
+	return int(res), nil
+}
+
+func isErr(loc string, res C.size_t) error {
+	code := int(C.ZSTD_getErrorCode(res))
+	if code == 0 {
+		return nil
+	}
+	if loc == "" {
+		return errCode(code)
+	}
+	return xerrors.Errorf("zstdwrap.%s: %w", loc, errCode(code))
+}
+
+type ErrorCode int
+
+func (code *ErrorCode) Error() string {
+	if code == nil {
+		return "zstdwrap.ErrorCode(nil)"
+	}
+	return C.GoString(C.ZSTD_getErrorString(C.ZSTD_ErrorCode(*code)))
+}
+
+// Zstd stable error codes.
+var (
+	ErrGeneric                      = errCode(1)
+	ErrPrefixUnknown                = errCode(10)
+	ErrVersionUnsupported           = errCode(12)
+	ErrFrameParameterUnsupported    = errCode(14)
+	ErrFrameParameterWindowTooLarge = errCode(16)
+	ErrCorruptionDetected           = errCode(20)
+	ErrChecksumWrong                = errCode(22)
+	ErrDictionaryCorrupted          = errCode(30)
+	ErrDictionaryWrong              = errCode(32)
+	ErrDictionaryCreationFailed     = errCode(34)
+	ErrParameterUnsupported         = errCode(40)
+	ErrParameterOutOfBound          = errCode(42)
+	ErrTableLogTooLarge             = errCode(44)
+	ErrMaxSymbolValueTooLarge       = errCode(46)
+	ErrMaxSymbolValueTooSmall       = errCode(48)
+	ErrStageWrong                   = errCode(60)
+	ErrInitMissing                  = errCode(62)
+	ErrMemoryAllocation             = errCode(64)
+	ErrWorkSpaceTooSmall            = errCode(66)
+	ErrDstSizeTooSmall              = errCode(70)
+	ErrSrcSizeWrong                 = errCode(72)
+	ErrDstBufferNull                = errCode(74)
+)
+
+func errCode(code int) *ErrorCode {
+	if e := knownErrCodes[code]; e != nil {
+		return e
+	}
+	e := ErrorCode(code)
+	knownErrCodes[code] = &e
+	return &e
+}
+
+// Avoid allocating errors.
+var knownErrCodes = make(map[int]*ErrorCode)

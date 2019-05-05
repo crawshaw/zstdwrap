@@ -20,6 +20,7 @@ import (
 	"testing"
 
 	"github.com/crawshaw/zstdwrap"
+	"golang.org/x/xerrors"
 )
 
 func Test(t *testing.T) {
@@ -58,6 +59,33 @@ func Test(t *testing.T) {
 		hasChecksum := frameHeaderDescriptor&0x4 != 0
 		if !hasChecksum {
 			t.Error("missing checksum")
+		}
+	})
+
+	t.Run("FrameContentSize", func(t *testing.T) {
+		sz, err := zstdwrap.FrameContentSize(dst)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if sz != int64(len(src)) {
+			t.Errorf("FrameContentSize=%d, want %d", sz, len(src))
+		}
+	})
+
+	t.Run("FrameCompressedSize", func(t *testing.T) {
+		sz, err := zstdwrap.FrameCompressedSize(dst)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if sz != len(dst) {
+			t.Errorf("FrameCompressedSize=%d, want %d", sz, len(src))
+		}
+	})
+
+	t.Run("FrameCompressedSize-ErrSrcSizeWrong", func(t *testing.T) {
+		_, err := zstdwrap.FrameCompressedSize(make([]byte, 2))
+		if !xerrors.Is(err, zstdwrap.ErrSrcSizeWrong) {
+			t.Errorf("FrameCompressedSize(bogus) err=%v, want ErrSrcSizeWrong", err)
 		}
 	})
 
