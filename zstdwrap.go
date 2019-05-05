@@ -200,6 +200,9 @@ func FrameContentSize(src []byte) (int64, error) {
 // FrameCompressedSize reports the size of a frame.
 // For the reported value n, buf[:n] is a valid src for Decompress.
 func FrameCompressedSize(buf []byte) (n int, err error) {
+	if len(buf) == 0 {
+		return 0, ErrSrcSizeWrong
+	}
 	var bufv unsafe.Pointer
 	if buf != nil {
 		bufv = unsafe.Pointer(&buf[0])

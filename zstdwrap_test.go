@@ -82,6 +82,13 @@ func Test(t *testing.T) {
 		}
 	})
 
+	t.Run("FrameCompressedSize-nilsrc", func(t *testing.T) {
+		_, err := zstdwrap.FrameCompressedSize(nil)
+		if !xerrors.Is(err, zstdwrap.ErrSrcSizeWrong) {
+			t.Errorf("FrameCompressedSize(nil) err=%v, want ErrSrcSizeWrong", err)
+		}
+	})
+
 	t.Run("FrameCompressedSize-ErrSrcSizeWrong", func(t *testing.T) {
 		_, err := zstdwrap.FrameCompressedSize(make([]byte, 2))
 		if !xerrors.Is(err, zstdwrap.ErrSrcSizeWrong) {
